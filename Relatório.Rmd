@@ -1,0 +1,431 @@
+---
+title: "Consumo de Combustíveis — Relatório"
+author: "Alef Ryan"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 9, fig.height = 5, fig.align = "center"
+)
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(here)
+knitr::opts_knit$set(root.dir = here::here())  # raiz do projeto como WD do Knit
+```
+
+# Pacotes
+```{r}
+library(tidyverse)
+library(seasonal)   
+library(geobr)      
+library(sf)
+library(sidrar)     
+library(gganimate)  
+library(purrr)
+
+
+```
+
+# Puxando dados
+
+```{r}
+
+arq <- here::here("dados", "vendas_distribuidoras_anp 1 (2).xlsx")
+
+# Checagem defensiva (opcional, mas útil)
+stopifnot(file.exists(arq))
+
+diesel   <- readxl::read_excel(arq, sheet = "diesel")
+gasolina <- readxl::read_excel(arq, sheet = "gasolina")
+etanol   <- readxl::read_excel(arq, sheet = "etanol")
+
+```
+
+## Organização da base
+
+```{r}
+diesel$tipo   <- "diesel"
+gasolina$tipo <- "gasolina"
+etanol$tipo   <- "etanol"
+
+dados <- rbind(diesel, gasolina, etanol)
+
+dados <- dados |>
+  pivot_longer(
+    cols      = starts_with("20"),
+    names_to  = "ano",
+    values_to = "Volume"
+  ) |>
+  rename(
+    uf_sigla = regiao,
+    Ano      = ano
+  ) |>
+  mutate(uf_sigla = toupper(uf_sigla))
+
+
+```
+
+# Série Temporal
+
+```{r}
+dados |>
+  filter(uf_sigla == "BR") |>
+  mutate(
+    mes  = as.character(meses),
+    data = my(paste(mes, Ano))
+  ) |>
+  group_by(tipo, data) |>
+  summarise(volume_soma = sum(Volume)) |>
+  ggplot(aes(x = data, y = volume_soma, color = tipo)) +
+  geom_line() +
+  labs(title = "Série Consumo Por Mês, ano e tipo de Combustível") +
+  theme_bw()
+
+```
+
+## Separando séries
+
+```{r}
+series <- dados |>
+  mutate(
+    mes  = as.character(meses),
+    data = my(paste(mes, Ano))
+  ) |>
+  group_by(tipo, data) |>
+  summarise(volume_soma = sum(Volume))
+
+```
+
+## Sazonalidade
+```{r}
+
+
+# Gasolina
+gasolina_ts <- series |>
+  select(volume_soma, tipo, data) |>
+  filter(tipo == "gasolina")
+gasolina_ts <- ts(gasolina_ts$volume_soma, frequency = 12, start = c(2000, 01))
+ajuste_gas  <- seas(gasolina_ts)
+pesos_gas_ts <- series(ajuste_gas, "s10")
+pesos_gas_ts <- window(pesos_gas_ts, start = c(2010, 1), end = c(2012, 12))
+plot(pesos_gas_ts)
+
+# Etanol
+etanol_ts <- series |>
+  select(volume_soma, tipo, data) |>
+  filter(tipo == "etanol")
+etanol_ts <- ts(etanol_ts$volume_soma, frequency = 12, start = c(2000, 01))
+ajuste_et  <- seas(etanol_ts)
+pesos_et_ts <- series(ajuste_et, "s10")
+pesos_et_ts <- window(pesos_et_ts, start = c(2010, 1), end = c(2012, 12))
+plot(pesos_et_ts)
+
+# Diesel
+diesel_ts <- series |>
+  select(volume_soma, tipo, data) |>
+  filter(tipo == "diesel")
+disel_ts <- ts(diesel_ts$volume_soma, frequency = 12, start = c(2000, 01))
+ajuste_di  <- seas(disel_ts)
+pesos_di_ts <- series(ajuste_di, "s10")
+pesos_di_ts <- window(pesos_di_ts, start = c(2010, 1), end = c(2012, 12))
+plot(pesos_di_ts)
+
+# Conjunto
+sezons <- cbind(pesos_di_ts, pesos_et_ts, pesos_gas_ts)
+plot(sezons)
+
+```
+As vendas apresentam um padrão sazonal claro. Para a gasolina, no final do ano as vendas são mais fortes e, no início do ano, mais fracas. Já o etanol cresce de forma constante ao longo do ano, mas apresenta uma queda abrupta perto do fim do período. O diesel segue padrão semelhante ao do etanol: as vendas aumentam no decorrer do ano e caem repentinamente no final.
+
+
+
+# Distribuição por Estado (Consumo per capita)
+
+Os graficos evidenciam as diferenças regionias, enquanto parte do sul e sudeste, há um maior consumo (evidenciado pela cor amarela), Estados do Norte e Nordeste consomem menos, uma vez que são mais pobres, a atividade econômica é menor, consumindo menso combustível. Tal padrão permanece em todos os mapas.
+
+```{r}
+
+
+pop_uf <- get_sidra(
+  6579,
+  geo    = "State",
+  period = "all"
+) |>
+  select(
+    uf  = `Unidade da Federação`,
+    Ano,
+    pop = Valor
+  )
+
+dicionario_uf <- tibble::tibble(
+  uf_sigla = c("AC","AL","AM","AP","BA","CE","DF","ES","GO","MA",
+               "MG","MS","MT","PA","PB","PE","PI","PR","RJ","RN",
+               "RS","RO","RR","SC","SE","SP","TO"),
+  uf_nome  = c("Acre","Alagoas","Amazonas","Amapá","Bahia","Ceará",
+               "Distrito Federal","Espírito Santo","Goiás","Maranhão",
+               "Minas Gerais","Mato Grosso do Sul","Mato Grosso",
+               "Pará","Paraíba","Pernambuco","Piauí","Paraná",
+               "Rio de Janeiro","Rio Grande do Norte","Rio Grande do Sul",
+               "Rondônia","Roraima","Santa Catarina","Sergipe",
+               "São Paulo","Tocantins")
+)
+
+pop_uf <- pop_uf |>
+  left_join(dicionario_uf, by = c("uf" = "uf_nome")) |>
+  select(Ano, uf_sigla, pop)
+
+dados <- dados |>
+  left_join(pop_uf, by = c("uf_sigla", "Ano"))
+
+```
+
+## Gasolina -- 2020(mapa)
+
+```{r }
+dados_2021_gas <- dados |>
+  filter(Ano == 2020, tipo == "gasolina") |>
+  group_by(uf_sigla, pop) |>
+  summarise(Volume = sum(Volume, na.rm = TRUE), .groups = "keep") |>
+  mutate(volume_pc = Volume / pop)
+
+# esconde o "carregamento"
+invisible(capture.output({
+  ufs <- geobr::read_state(year = 2020, simplified = TRUE)
+}))
+mapa <- ufs |>
+  left_join(dados_2021_gas, by = c("abbrev_state" = "uf_sigla"))
+
+ggplot(mapa) +
+  geom_sf(aes(fill = Volume), color = "white", size = .1) +
+  scale_fill_viridis_c(na.value = "grey90", name = "m³_pc") +
+  labs(title = "Consumo de gasolina por UF — 2020") +
+  theme_minimal()
+
+```
+
+## Etanol -- 2020 (mapa)
+
+```{r}
+dados_2021_et <- dados |>
+  filter(Ano == 2020, tipo == "etanol") |>
+  group_by(uf_sigla, pop) |>
+  summarise(Volume = sum(Volume, na.rm = TRUE), .groups = "keep") |>
+  mutate(volume_pc = Volume / pop)
+
+ufs <- geobr::read_state(year = 2020, simplified = TRUE) |>
+  select(abbrev_state, name_state, geom)
+
+mapa <- ufs |>
+  left_join(dados_2021_gas, by = c("abbrev_state" = "uf_sigla"))
+
+ggplot(mapa) +
+  geom_sf(aes(fill = Volume), color = "white", size = .1) +
+  scale_fill_viridis_c(na.value = "grey90", name = "m³") +
+  labs(title = "Consumo de etanol por UF — 2020") +
+  theme_minimal()
+
+
+```
+
+
+## Diesel -- 2021(mapa)
+
+```{r}
+dados_2021_et <- dados |>
+  filter(Ano == 2020, tipo == "diesel") |>
+  group_by(uf_sigla, pop) |>
+  summarise(Volume = sum(Volume, na.rm = TRUE), .groups = "keep") |>
+  mutate(volume_pc = Volume / pop)
+
+ufs <- geobr::read_state(year = 2020, simplified = TRUE) |>
+  select(abbrev_state, name_state, geom)
+
+mapa <- ufs |>
+  left_join(dados_2021_gas, by = c("abbrev_state" = "uf_sigla"))
+
+ggplot(mapa) +
+  geom_sf(aes(fill = Volume), color = "white", size = .1) +
+  scale_fill_viridis_c(na.value = "grey90", name = "m³/pop") +
+  labs(title = "Consumo de Diesel por UF — 2020") +
+  theme_minimal()
+
+```
+## Share -- 2020
+
+```{r}
+
+# Totais por UF (um valor por UF)
+base_uf <- dados |> 
+  filter(Ano == 2020, uf_sigla != "BR") |> 
+  group_by(uf_sigla,tipo) |> 
+  summarise(Volume = sum(Volume, na.rm = TRUE), .groups = "drop")
+
+total_vol <- sum(base_uf$Volume, na.rm = TRUE)
+
+total_vol <- base_uf |> 
+  group_by(tipo) |> 
+  summarise(
+    total_vol_tipo = sum(Volume)
+  )
+
+
+# Participação por região (totais)
+regioes <- base_uf |> 
+  group_by(tipo) |> 
+  mutate(Volume_total = sum(Volume, na.rm = TRUE)) |> 
+  mutate(share = Volume / Volume_total)
+
+
+tab_gasolina <- regioes |>
+  filter(tipo == "gasolina") |>
+  arrange(desc(share)) 
+
+tab_etanol <- regioes |>
+  filter(tipo == "etanol") |>
+  arrange(desc(share))
+
+tab_diesel <- regioes |>
+  filter(tipo == "diesel") |>
+  arrange(desc(share)) 
+
+knitr::kable(tab_gasolina, caption = "Totais e participação por UF — Gasolina")
+knitr::kable(tab_etanol,  caption = "Totais e participação por UF — Etanol")
+knitr::kable(tab_diesel,  caption = "Totais e participação por UF — Diesel")
+
+
+```
+O mercado de gasolina é bem concentrado: São Paulo (46,3%) e Minas Gerais (20,9%) somam cerca de 67%. Com Pará (7,8%) e Goiás (7,3%), os quatro maiores chegam a ~82% do total. Entre as demais UFs listadas, DF (6,1%), Maranhão (6,0%), Mato Grosso (3,2%) e Tocantins (2,3%).
+
+O mercado de etanol  é extremamente concentrado: São Paulo responde por 64,9%, Minas Gerais por 17,6%, Goiás por 10,0% e Mato Grosso por 5,9% — juntos, 98,3% do total. As demais UFs listadas (DF, PA, MA e TO) têm menos de 1% cada e somam 1,7%. 
+
+O mercado de diesel somou é fortemente concentrado: São Paulo (39,4%) e Minas Gerais (22,7%) respondem juntos por cerca de 62%. Somando Mato Grosso (10,3%) e Goiás (9,6%), os quatro maiores chegam a ~82% do total. Entre Norte e Nordeste, destacam-se Pará (8,5%), Maranhão (4,7%) e Tocantins (3,7%), enquanto o Distrito Federal tem participação residual (1,1%). 
+
+
+
+# Evolução Consumo últmos 5 anos (por UF)
+
+Os dados foram analisados excluindo 2021, devido à falta de valores deste ano. Como podemos observar os graficos abaixos, dos três combustíveis nos ultimos 5 anos, apenas a gasolina perdeu caiu em venda. Tanto o etanol, quanto o diesel, tiveram um aumento.
+
+
+## Gasolina
+```{r}
+combustivel_alvo <- "gasolina"
+
+serie <- dados |>
+  filter(tipo == combustivel_alvo, uf_sigla != "BR", Ano < 2021, Ano > 2014) |> 
+  group_by(uf_sigla, Ano, pop) |>
+  summarise(consumo = sum(Volume, na.rm = TRUE), .groups = "keep") |>
+  mutate(consumo_pc = consumo / pop)
+
+ggplot(
+  serie,
+  aes(x = Ano, y = consumo, group = uf_sigla, color = factor(uf_sigla))
+) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = paste0("Consumo de", combustivel_alvo),
+    y = "Volume (m³)",
+    color = "UF"
+  ) +
+  theme_bw() 
+
+
+```
+
+## Etanol
+```{r}
+combustivel_alvo <- "etanol"
+
+serie <- dados |>
+  filter(tipo == combustivel_alvo, uf_sigla != "BR", Ano < 2021, Ano > 2014) |>
+  mutate(Ano = as.numeric(Ano)) |>
+  group_by(uf_sigla, Ano) |>
+  summarise(consumo = sum(Volume, na.rm = TRUE), .groups = "drop")
+
+ggplot(
+  serie,
+  aes(x = Ano, y = consumo, group = uf_sigla, color = factor(uf_sigla))
+) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = paste0("Consumo de ", combustivel_alvo),
+    y = "Volume (m³)",
+    color = "UF"
+  ) +
+  theme_bw() 
+
+```
+
+## Diesel
+```{r}
+combustivel_alvo <- "diesel"
+
+serie <- dados |>
+  filter(tipo == combustivel_alvo, uf_sigla != "BR", Ano < 2021) |>
+  mutate(Ano = as.numeric(Ano)) |>
+  group_by(uf_sigla, Ano) |>
+  summarise(consumo = sum(Volume, na.rm = TRUE), .groups = "drop")
+
+ggplot(
+  serie,
+  aes(x = Ano, y = consumo, group = uf_sigla, color = factor(uf_sigla))
+) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = paste0("Consumo de ", combustivel_alvo),
+    y = "Volume (m³)",
+    color = "UF"
+  ) +
+  theme_bw() 
+
+```
+
+## Tamanho do mercado (últimos 5 anos)
+```{r}
+vol_ano_total <- dados |>
+  filter(uf_sigla == "BR") |>
+  mutate(Ano = as.integer(Ano)) |>
+  group_by(Ano, tipo) |>
+  summarise(volume_total = sum(Volume, na.rm = TRUE), .groups = "drop")
+
+ult_ano = 2020
+janela  <- ( 2020- 4):ult_ano
+
+vol5_tipo <- vol_ano_total |>
+  filter(Ano %in% janela)
+
+cagr_5a <- vol5_tipo |>
+  arrange(Ano) |>
+  group_by(tipo) |>
+  summarise(cagr = (last(volume_total) / first(volume_total))^(1 / (5 - 1)) - 1) 
+
+tab <- vol5_tipo |>
+  select(tipo, Ano, volume_total) |>
+  pivot_wider(names_from = Ano, values_from = volume_total) |>
+  left_join(cagr_5a, by = "tipo")
+
+knitr::kable(tab, caption = "Volumes (m³) por tipo e ano, com CAGR (5 anos)")
+
+```
+
+
+
+Diesel — Em 2020, o mercado totalizou 57.472.056 m³ (≈ 57,5 bilhões de litros). De 2016 a 2020, cresceu à taxa geométrica de 1,4% a.a.
+
+Etanol — Em 2020, o mercado totalizou 19.257.933 m³ (≈ 19,3 bilhões de litros). De 2016 a 2020, cresceu à taxa geométrica de 7,2% a.a.
+
+Gasolina — Em 2020, o mercado totalizou 35.823.614 m³ (≈ 35,8 bilhões de litros). De 2016 a 2020, recuou à taxa geométrica de 4,5% a.a.
+
